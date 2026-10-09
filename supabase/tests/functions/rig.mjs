@@ -58,7 +58,7 @@ export const serviceRoleToken = () => signJwt({ role: 'service_role', exp: inOne
 export const anonToken = () => signJwt({ role: 'anon', exp: inOneHour() });
 
 // ---------------------------------------------------------------- the rig
-export async function startRig({ log = () => {} } = {}) {
+export async function startRig({ log = () => {}, extraMigrations = [], withFunction = true } = {}) {
   const PGBIN = process.env.PGBIN || '/usr/lib/postgresql/16/bin';
   const POSTGREST_BIN = process.env.POSTGREST_BIN;
   const DENO_BIN = process.env.DENO_BIN || 'deno';
@@ -111,6 +111,7 @@ export async function startRig({ log = () => {} } = {}) {
 
     psqlFile(`${ROOT}/supabase/tests/support/00_supabase_stub.sql`);
     psqlFile(process.env.MIGRATION || `${ROOT}/supabase/migrations/20261009120000_core_schema.sql`);
+    for (const migration of extraMigrations) psqlFile(migration);   // later steps (for example Step 4), applied in order
     // Supabase connects PostgREST as a login role called "authenticator" that can switch to the three API roles.
     sql(`create role authenticator login noinherit;
          grant anon, authenticated, service_role to authenticator;
@@ -138,8 +139,29 @@ export async function startRig({ log = () => {} } = {}) {
     await waitFor(async () => (await fetch(`http://127.0.0.1:${PORTS.admin}/ready`)).status === 200, 'PostgREST', () => restLog);
 
     // The gateway: Supabase puts one of these in front of everything.
+    const logins = new Map();   // email -> { password, sub, extra }: the sign-in stand-in, used by the admin page test
+    const cors = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'authorization, apikey, content-type, x-client-info', 'access-control-allow-methods': 'GET, POST, PATCH, OPTIONS' };
     gateway = http.createServer((req, res) => {
       const url = new URL(req.url, 'http://gateway');
+      if (url.pathname === '/auth/v1/token') {
+        // Stand-in for Supabase Auth password sign-in: only the emails registered with registerLogin() can sign in.
+        if (req.method === 'OPTIONS') { res.writeHead(204, cors); return res.end(); }
+        let raw = '';
+        req.on('data', (d) => (raw += d));
+        req.on('end', () => {
+          for (const [k, v] of Object.entries(cors)) res.setHeader(k, v);
+          res.setHeader('content-type', 'application/json');
+          let body = {};
+          try { body = JSON.parse(raw); } catch { /* empty */ }
+          const known = logins.get(String(body.email));
+          if (url.searchParams.get('grant_type') !== 'password' || !known || known.password !== body.password) {
+            res.statusCode = 400;
+            return res.end(JSON.stringify({ code: 400, error_code: 'invalid_credentials', msg: 'Invalid login credentials' }));
+          }
+          res.end(JSON.stringify({ access_token: userToken(known.sub, known.extra), token_type: 'bearer', expires_in: 3600, user: { id: known.sub, email: body.email } }));
+        });
+        return;
+      }
       if (url.pathname === '/auth/v1/user') {
         // Stand-in for Supabase Auth: accepts a validly signed user token, refuses everything else.
         const m = /^Bearer (\S+)$/.exec(req.headers.authorization || '');
@@ -162,32 +184,36 @@ export async function startRig({ log = () => {} } = {}) {
     });
     await new Promise((resolve) => gateway.listen(PORTS.gateway, '127.0.0.1', resolve));
 
-    // The REAL function, run by Deno, with the same environment variables Supabase provides.
-    const denoCert = process.env.DENO_CERT || (existsSync('/root/.ccr/ca-bundle.crt') ? '/root/.ccr/ca-bundle.crt' : undefined);
-    const fnPath = `${ROOT}/supabase/functions/create-quote/index.ts`;
-    const deno = spawn(DENO_BIN, ['run', '--node-modules-dir=none', '--no-lock', '--allow-net', '--allow-env', '--allow-read', fnPath], {
-      env: {
-        ...process.env,
-        ...(denoCert ? { DENO_CERT: denoCert } : {}),
-        DENO_SERVE_ADDRESS: `tcp:127.0.0.1:${PORTS.fn}`,
-        SUPABASE_URL: `http://127.0.0.1:${PORTS.gateway}`,
-        SUPABASE_PUBLISHABLE_KEYS: JSON.stringify({ default: anonToken() }),
-        SUPABASE_SECRET_KEYS: JSON.stringify({ default: serviceRoleToken() }),
-        ...(process.env.RIG_FN_ENV ? JSON.parse(process.env.RIG_FN_ENV) : {}),
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    children.push(deno);
     let denoLog = '';
-    deno.stdout.on('data', (d) => (denoLog += d));
-    deno.stderr.on('data', (d) => (denoLog += d));
-    await waitFor(async () => (await fetch(`http://127.0.0.1:${PORTS.fn}/`, { method: 'OPTIONS' })).status === 200, 'Deno function', () => denoLog, 120_000);
+    if (withFunction) {
+      // The REAL function, run by Deno, with the same environment variables Supabase provides.
+      const denoCert = process.env.DENO_CERT || (existsSync('/root/.ccr/ca-bundle.crt') ? '/root/.ccr/ca-bundle.crt' : undefined);
+      const fnPath = `${ROOT}/supabase/functions/create-quote/index.ts`;
+      const deno = spawn(DENO_BIN, ['run', '--node-modules-dir=none', '--no-lock', '--allow-net', '--allow-env', '--allow-read', fnPath], {
+        env: {
+          ...process.env,
+          ...(denoCert ? { DENO_CERT: denoCert } : {}),
+          DENO_SERVE_ADDRESS: `tcp:127.0.0.1:${PORTS.fn}`,
+          SUPABASE_URL: `http://127.0.0.1:${PORTS.gateway}`,
+          SUPABASE_PUBLISHABLE_KEYS: JSON.stringify({ default: anonToken() }),
+          SUPABASE_SECRET_KEYS: JSON.stringify({ default: serviceRoleToken() }),
+          ...(process.env.RIG_FN_ENV ? JSON.parse(process.env.RIG_FN_ENV) : {}),
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      children.push(deno);
+      deno.stdout.on('data', (d) => (denoLog += d));
+      deno.stderr.on('data', (d) => (denoLog += d));
+      await waitFor(async () => (await fetch(`http://127.0.0.1:${PORTS.fn}/`, { method: 'OPTIONS' })).status === 200, 'Deno function', () => denoLog, 120_000);
+    }
 
     return {
       sql,
       functionUrl: `http://127.0.0.1:${PORTS.fn}/`,
       restUrl: `http://127.0.0.1:${PORTS.gateway}/rest/v1`,
       denoLog: () => denoLog,
+      gatewayUrl: `http://127.0.0.1:${PORTS.gateway}`,
+      registerLogin: (email, password, sub, extra = {}) => logins.set(email, { password, sub, extra }),
       stop: cleanup,
     };
   } catch (e) {

@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Diesel prices</title>
+<!--
+  Diesel prices: the page a Manifest platform admin uses to publish the weekly diesel price.
+
+  How to use it: save this file on your computer and open it in a browser (double-click it). Nothing is installed
+  and no server is needed. Sign in with your platform admin account, type the Monday and the price from the
+  EU Weekly Oil Bulletin (Belgium, diesel, with taxes, EUR per 1000 litres), and publish.
+
+  What it does NOT do: it makes no decisions. Every check (is it a Monday, is the number sane, is it more than 5 %
+  away from the neighbouring week, does that Monday already have a price) is made by the database function
+  public.publish_diesel_price. This page only sends the numbers and shows the answer.
+
+  Safety: no password is stored. The sign-in token lives in this page's memory and disappears when you close or
+  reload it. Nothing is written to the browser's storage. The two values below are not secrets: the project address
+  and the publishable key are meant to be public (row level security protects the data).
+-->
+<style>
+  :root {
+    --bg: #f6f6f3; --card: #ffffff; --ink: #1c1c1a; --muted: #5f5f58; --line: #d9d9d2;
+    --accent: #1f4fd8; --ok: #17663a; --ok-bg: #e6f4ea; --warn: #8a5a00; --warn-bg: #fff4d6; --bad: #a3231a; --bad-bg: #fde8e6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151514; --card: #1f1f1d; --ink: #ecece8; --muted: #a3a39b; --line: #3a3a36;
+      --accent: #7ea2ff; --ok: #7fd6a1; --ok-bg: #16301f; --warn: #f0c36b; --warn-bg: #3a2e12; --bad: #ff9d94; --bad-bg: #3d1a17;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 24px; margin: 0 0 4px; }
+  h2 { font-size: 18px; margin: 0 0 12px; }
+  .muted { color: var(--muted); font-size: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; margin-top: 16px; }
+  label { display: block; font-size: 14px; font-weight: 600; margin: 12px 0 4px; }
+  input { width: 100%; padding: 10px 12px; font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
+  input:focus-visible, button:focus-visible { outline: 3px solid var(--accent); outline-offset: 1px; }
+  button { font: inherit; padding: 10px 16px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  @media (prefers-color-scheme: dark) { button.primary { color: #0b1020; } }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+  .row > div { flex: 1 1 200px; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+  .msg { border-radius: 8px; padding: 12px 14px; margin-top: 16px; }
+  .msg.ok { background: var(--ok-bg); color: var(--ok); }
+  .msg.warn { background: var(--warn-bg); color: var(--warn); }
+  .msg.bad { background: var(--bad-bg); color: var(--bad); }
+  .msg p { margin: 0 0 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 15px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 8px 6px; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child { text-align: left; }
+  th { font-size: 13px; color: var(--muted); font-weight: 600; }
+  .scroll { overflow-x: auto; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Diesel prices</h1>
+  <p class="muted">Publish the weekly diesel price that every carrier's quotes use. Platform admins only.</p>
+
+  <section id="signin" class="card">
+    <h2>Sign in</h2>
+    <form id="signin-form" autocomplete="off">
+      <label for="email">Email</label>
+      <input id="email" type="email" required autocomplete="username">
+      <label for="password">Password</label>
+      <input id="password" type="password" required autocomplete="current-password">
+      <div class="actions"><button class="primary" type="submit" id="signin-button">Sign in</button></div>
+    </form>
+    <div id="signin-msg" role="status" aria-live="polite"></div>
+  </section>
+
+  <div id="app" hidden>
+    <section class="card">
+      <div class="row">
+        <div><span id="who" class="muted"></span></div>
+        <div style="flex:0 0 auto"><button type="button" id="signout">Sign out</button></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Latest prices</h2>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Monday</th><th>EUR per 1000 L</th><th>EUR per litre</th><th>Change</th></tr></thead>
+          <tbody id="prices"></tbody>
+        </table>
+      </div>
+      <p id="prices-empty" class="muted" hidden>No price has been published yet.</p>
+    </section>
+
+    <section class="card">
+      <h2>Publish a price</h2>
+      <p class="muted">Source: EU Weekly Oil Bulletin, Belgium, diesel, <strong>with taxes</strong>. The price is per 1000 litres, for example 1534.70. The Monday is the day the price is "in force on".</p>
+      <form id="entry-form" autocomplete="off" novalidate>
+        <div class="row">
+          <div>
+            <label for="monday">Monday</label>
+            <input id="monday" type="date" required>
+          </div>
+          <div>
+            <label for="price">Price, EUR per 1000 L</label>
+            <input id="price" type="text" inputmode="decimal" placeholder="1534.70" required>
+          </div>
+        </div>
+        <div class="actions"><button class="primary" type="submit" id="review-button">Review</button></div>
+      </form>
+      <div id="review" class="msg warn" hidden>
+        <p id="review-text"></p>
+        <div class="actions">
+          <button class="primary" type="button" id="publish">Publish</button>
+          <button type="button" id="cancel">Cancel</button>
+        </div>
+      </div>
+      <div id="result" role="status" aria-live="polite"></div>
+    </section>
+  </div>
+</main>
+
+<script>
+'use strict';
+// Public values, not secrets (see the note at the top). Tests may preset window.DIESEL_ADMIN_CONFIG; a normal visit never does.
+const CONFIG = window.DIESEL_ADMIN_CONFIG || {
+  url: 'https://okbirogiwjbkpivgmded.supabase.co',
+  key: 'sb_publishable_LTpAt4nf0Tt5wn0goUKOBQ_x68WYOTi',
+};
+
+let token = null;      // the sign-in token, in memory only
+let pending = null;    // what the person is about to publish: { monday, priceText, replace, acceptBigMove }
+
+const $ = (id) => document.getElementById(id);
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+// ---------- small helpers (all text goes in with textContent, never as HTML)
+function setMessage(box, kind, lines) {
+  box.replaceChildren();
+  if (!lines || !lines.length) return;
+  const div = document.createElement('div');
+  div.className = `msg ${kind}`;
+  for (const line of lines) { const p = document.createElement('p'); p.textContent = line; div.appendChild(p); }
+  box.appendChild(div);
+}
+const eur = (cents) => (Math.floor(cents / 100)).toLocaleString('en-GB') + '.' + String(cents % 100).padStart(2, '0');
+const perLitre = (cents) => (cents / 100000).toFixed(4);
+function longDate(iso) { const [y, m, d] = iso.split('-').map(Number); return `${d} ${MONTHS[m - 1]} ${y}`; }
+// Integer percentage in basis points, rounded half away from zero (display only; the database decides).
+function changeBp(now, before) { const n = (now - before) * 10000; const q = Math.floor((Math.abs(n) * 2 + before) / (2 * before)); return n < 0 ? -q : q; }
+function pct(bp) { const a = Math.abs(bp); return `${bp < 0 ? '-' : '+'}${Math.floor(a / 100)}.${String(a % 100).padStart(2, '0')} %`; }
+function latestMondayToday() {
+  const d = new Date();
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));   // back to Monday (Sunday = 0)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+// "1534.70", "1534,70", "1 534,70" -> "1534.70"; anything else -> null. At most 2 decimals, never rounded.
+function normalisePrice(text) {
+  const t = text.trim().replace(/\s+/g, '').replace(',', '.');
+  return /^\d{1,5}(\.\d{1,2})?$/.test(t) ? t : null;
+}
+const cents = (priceText) => { const [w, f = ''] = priceText.split('.'); return Number(w) * 100 + Number((f + '00').slice(0, 2)); };
+
+async function api(path, options = {}) {
+  const headers = { apikey: CONFIG.key, ...(options.headers || {}) };
+  if (token) headers.authorization = `Bearer ${token}`;
+  const response = await fetch(`${CONFIG.url}${path}`, { ...options, headers });
+  let body = null;
+  try { body = await response.json(); } catch { /* no JSON */ }
+  return { status: response.status, body };
+}
+
+// ---------- sign in / out
+function showSignedOut(note) {
+  token = null; pending = null;
+  $('app').hidden = true; $('signin').hidden = false;
+  $('password').value = '';
+  setMessage($('signin-msg'), 'warn', note ? [note] : []);
+}
+$('signin-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const email = $('email').value.trim();
+  $('signin-button').disabled = true;
+  setMessage($('signin-msg'), 'warn', ['Signing in...']);
+  try {
+    const { status, body } = await api('/auth/v1/token?grant_type=password', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email, password: $('password').value }),
+    });
+    $('password').value = '';
+    if (status === 200 && body && body.access_token) {
+      token = body.access_token;
+      $('signin').hidden = true; $('app').hidden = false;
+      $('who').textContent = `Signed in as ${email}`;
+      $('monday').value = latestMondayToday();
+      setMessage($('signin-msg'), 'ok', []);
+      await loadPrices();
+    } else {
+      setMessage($('signin-msg'), 'bad', [`Sign-in failed: ${(body && (body.msg || body.error_description || body.message)) || `HTTP ${status}`}`]);
+    }
+  } catch (error) {
+    $('password').value = '';
+    setMessage($('signin-msg'), 'bad', [`Could not reach the server: ${error.message}`]);
+  } finally {
+    $('signin-button').disabled = false;
+  }
+});
+$('signout').addEventListener('click', () => showSignedOut('Signed out.'));
+
+// ---------- the list of stored prices
+async function loadPrices() {
+  const { status, body } = await api('/rest/v1/fuel_prices?select=monday,price_cents&order=monday.desc&limit=10');
+  if (status === 401) return showSignedOut('Your sign-in has expired. Please sign in again.');
+  const rows = status === 200 && Array.isArray(body) ? body : [];
+  const tbody = $('prices');
+  tbody.replaceChildren();
+  rows.forEach((row, i) => {
+    const before = rows[i + 1];
+    const cells = [longDate(row.monday), eur(row.price_cents), perLitre(row.price_cents),
+                   before && before.price_cents > 0 ? pct(changeBp(row.price_cents, before.price_cents)) : ''];
+    const tr = document.createElement('tr');
+    for (const text of cells) { const td = document.createElement('td'); td.textContent = text; tr.appendChild(td); }
+    tbody.appendChild(tr);
+  });
+  $('prices-empty').hidden = rows.length > 0;
+}
+
+// ---------- review, then publish
+$('entry-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  setMessage($('result'), 'ok', []);
+  const monday = $('monday').value;
+  const priceText = normalisePrice($('price').value);
+  if (!monday) return setMessage($('result'), 'bad', ['Pick the Monday.']);
+  if (!priceText) return setMessage($('result'), 'bad', ['Type the price in EUR per 1000 litres with at most 2 decimals, for example 1534.70.']);
+  pending = { monday, priceText, replace: false, acceptBigMove: false };
+  $('review-text').textContent = `Publish EUR ${eur(cents(priceText))} per 1000 L (EUR ${perLitre(cents(priceText))} per litre) as the price in force on Monday ${longDate(monday)}?`;
+  $('review').hidden = false;
+});
+$('cancel').addEventListener('click', () => { pending = null; $('review').hidden = true; });
+$('publish').addEventListener('click', () => submit());
+
+async function submit() {
+  if (!pending) return;
+  $('review').hidden = true;
+  $('publish').disabled = true;
+  setMessage($('result'), 'warn', ['Publishing...']);
+  try {
+    const { status, body } = await api('/rest/v1/rpc/publish_diesel_price', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        p_monday: pending.monday,
+        p_eur_per_1000l: pending.priceText,      // sent as text so no rounding can happen on the way
+        p_replace: pending.replace,
+        p_accept_big_move: pending.acceptBigMove,
+      }),
+    });
+    if (status === 200 && body && body.status) return onPublished(body);
+    if (status === 401) return showSignedOut('Your sign-in has expired. Please sign in again.');
+    return onRefused(status, body);
+  } catch (error) {
+    setMessage($('result'), 'bad', [`Could not reach the server: ${error.message}. Nothing was published.`]);
+  } finally {
+    $('publish').disabled = false;
+  }
+}
+
+function onPublished(r) {
+  const what = { created: 'Published', replaced: 'Replaced', unchanged: 'Already published with exactly this price, nothing changed' }[r.status] || r.status;
+  const lines = [`${what}: EUR ${eur(r.price_cents)} per 1000 L for Monday ${longDate(r.monday)}.`];
+  if (r.compared_with) lines.push(`Compared with ${longDate(r.compared_with.monday)} (EUR ${eur(r.compared_with.price_cents)}): ${pct(r.compared_with.change_bp)}.`);
+  if (r.big_move_accepted) lines.push('This was more than 5 % away and you confirmed it.');
+  setMessage($('result'), 'ok', lines);
+  pending = null;
+  $('price').value = '';
+  loadPrices();
+}
+
+function onRefused(status, body) {
+  const code = body && body.message;
+  const overridable = code === 'BIG_MOVE' || code === 'PRICE_EXISTS';
+  const lines = [(body && body.details) || `The server answered HTTP ${status}.`];
+  if (code === 'BIG_MOVE') lines.push('Check the number against the bulletin.');
+  else if (body && body.hint && !overridable) lines.push(body.hint);   // the hints of the other refusals are written for people
+  setMessage($('result'), overridable ? 'warn' : 'bad', [...lines, 'Nothing was published.']);
+  // The two refusals that can be overridden on purpose get a button. The others must be fixed in the form.
+  const box = $('result').firstChild;
+  if (code === 'BIG_MOVE') addButton(box, 'I checked the bulletin, publish anyway', () => { pending.acceptBigMove = true; submit(); });
+  if (code === 'PRICE_EXISTS') addButton(box, 'Replace the stored price', () => { pending.replace = true; submit(); });
+}
+function addButton(box, label, onClick) {
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+  const button = document.createElement('button');
+  button.type = 'button'; button.className = 'primary'; button.textContent = label;
+  button.addEventListener('click', onClick);
+  actions.appendChild(button);
+  box.appendChild(actions);
+}
+</script>
+</body>
+</html>

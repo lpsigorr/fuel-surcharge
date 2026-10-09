@@ -1,8 +1,8 @@
 # fuel-surcharge
 
-A fuel surcharge and quoting system for Belgian road transport, built in small approved steps. Step 1 is the formula, written down, coded and tested. Step 2 is the database, applied to Supabase and tested. Step 3 is the function that makes and saves a quote.
+A fuel surcharge and quoting system for Belgian road transport, built in small approved steps. Step 1 is the formula, written down, coded and tested. Step 2 is the database, applied to Supabase and tested. Step 3 is the function that makes and saves a quote. Step 4 is entering the weekly diesel price.
 
-**Status:** Steps 1 and 2 approved on 2026-10-09. The database is applied to a Supabase project and holds no real data yet. Step 3 (the create-quote function) is built and tested on a local copy of Supabase, but it is not approved or deployed yet. No website or real customer is connected.
+**Status:** Steps 1, 2 and 3 approved on 2026-10-09. The database and the create-quote function are deployed to a Supabase project, which holds no real data. Step 4 (entering the weekly diesel price) is built and tested on a local copy of Supabase, but it is not approved or deployed yet. No website or real customer is connected.
 
 ## The rule
 
@@ -64,6 +64,9 @@ No `npm install` is needed; there are no dependencies.
 | `supabase/functions/create-quote/index.ts` | Step 3: the web endpoint (runs on Deno). Plumbing only. |
 | `supabase/functions/_shared/` | Step 3: `create-quote.mjs` (the rules), `supabase-deps.mjs` (the database calls), `surcharge.mjs` (a copy of the Step 1 formula) |
 | `supabase/tests/functions/`, `supabase/tests/run-function-tests.sh` | Step 3: tests for the function, including a local copy of Supabase to run it against |
+| `supabase/migrations/20261009150000_diesel_price_entry.sql` | Step 4: the diesel price function and its audit trail. NOT applied to Supabase yet. |
+| `admin/diesel-prices.html` | Step 4: the admin page for entering the weekly price. One file, double-click to use. |
+| `supabase/tests/run-entry-local.sh`, `diesel_price_entry.test.sql`, `entry_crosscheck.mjs`, `entry-api.e2e.mjs`, `admin-page.e2e.mjs` | Step 4: tests (see the Step 4 section) |
 
 ## What is verified, and what is not
 
@@ -145,7 +148,7 @@ The connection between Claude and Supabase currently reaches the whole Supabase 
 
 ## Step 3: the create-quote function
 
-**Status:** built and tested on a local copy of Supabase. Not approved or deployed yet.
+**Status:** approved on 2026-10-09, deployed to the Supabase project as version 1 (JWT check on) and live-tested the same day.
 
 A signed-in member of a carrier sends a zone, a vehicle type and a service date. The function looks up the carrier's settings and rate, finds the diesel price for the reference Monday, runs the Step 1 formula and saves the frozen quote. The database then re-checks the maths before accepting it. This version is for staff quotes only. The website widget comes later.
 
@@ -192,11 +195,92 @@ Verified:
 - 24 deliberately broken copies of the code (skipped membership check, guessed price, wrong rounding, server key used for reads, keys swapped, and others) were all caught.
 - `deno check` accepts `index.ts`.
 
+Verified live (2026-10-09, on the deployed function, with a throwaway carrier and a throwaway user that were deleted afterwards; all 13 tables were counted at 0 rows):
+- A real Supabase sign-in, then one quote with the Febetra figures: diesel +23.31 %, surcharge 4.92 %, surcharge EUR 16.40, total EUR 349.73 (rate 333.33, base 1,244.60, current 1,534.70, fuel share 21.1 %, lag 7 days, service date 2026-10-09, reference Monday 2026-09-28). The saved row matched.
+- Refused, and nothing saved: a missing diesel price, a carrier the user does not belong to, an unknown field, a bad date, a zone that does not exist.
+- Through the database API, that same signed-in user could not insert or edit quotes, read the platform admin list, or publish diesel prices.
+- The platform refused a request whose bearer value was not a valid token (401, `UNAUTHORIZED_INVALID_JWT_FORMAT`). Its logs mark a request that carries only the publishable key in the `apikey` header as `sb_api_key_compatibility: minted`: the gateway turns that key into an anonymous token. So the platform's JWT check alone does not prove who the caller is, and the function's own check of the user (`auth.getUser`) is the gate that decides.
+- The browser preflight (CORS) answers with `allow-origin: *` and the headers a website needs.
+
 Not verified:
-- It has never run on the real Supabase. In the local copy the gateway and Supabase Auth are stand-ins and the API keys are plain tokens, not the real `sb_publishable_` and `sb_secret_` keys. How the function reads those keys in production is unverified until a live test.
 - Local PostgREST is version 12.2.3. The version Supabase runs may differ.
 - Sending the same request twice saves two quotes. There is no duplicate protection yet.
 - No rate limiting, and no website widget mode.
+
+## Step 4: entering the weekly diesel price
+
+**Status:** built and tested on a local copy of Supabase. Not approved. Nothing is deployed: the migration is not applied to the real project and the page is not in use.
+
+A platform admin publishes one price per Monday: the EU Weekly Oil Bulletin figure for Belgium, diesel, with taxes, in EUR per 1000 litres. Every carrier's quotes read it. There are two pieces. A database function makes every decision. A one-file admin page only sends the numbers and shows the answer.
+
+### The function
+
+`public.publish_diesel_price(p_monday, p_eur_per_1000l, p_replace, p_accept_big_move)` runs with the caller's own rights, not the database owner's. Only signed-in users may call it, and inside it only platform admins pass. The checks run in this order and the first failure stops everything:
+
+| # | Check | If it fails (HTTP, code) |
+|---|---|---|
+| 1 | The caller is a platform admin | 403 `NOT_ALLOWED` |
+| 2 | The date is a Monday | 422 `INVALID_MONDAY` |
+| 3 | The Monday is not after today's date in Brussels | 422 `MONDAY_IN_FUTURE` |
+| 4 | The price is above 0 and has at most 2 decimals. It is never rounded for you. | 422 `INVALID_PRICE` |
+| 5 | The price is between EUR 500.00 and 5,000.00 per 1000 L | 422 `PRICE_OUT_OF_RANGE` |
+| 6 | That Monday has no different price already. The same price again changes nothing and answers `unchanged`. | 409 `PRICE_EXISTS`, unless `p_replace` is true |
+| 7 | The price is at most 5 % away from the closest other stored Monday (a tie goes to the earlier one). Exactly 5.00 % passes. | 409 `BIG_MOVE`, unless `p_accept_big_move` is true |
+
+Every refusal carries a code, a plain sentence and a next step. On success the answer says `created`, `replaced` or `unchanged`, and what the price was compared with.
+
+**Audit trail.** `private.fuel_price_changes` is not reachable through the API (row level security on, no policy, no grant). A trigger on `fuel_prices` records every insert, update and delete from any path, with who and when. Changing the Monday of a price is logged as a delete plus an insert.
+
+### The admin page
+
+`admin/diesel-prices.html`. Save the file on your computer and double-click it. Sign in with a platform admin account. It shows the latest 10 prices with the change from the week before, and has a form: Monday, price, Review, Publish. The price may be typed `1534.70`, `1534,70` or `1 534,70`. The Review step repeats the number back in words before anything is sent.
+
+- No password is stored. The sign-in token lives in the page's memory and disappears when the page is closed.
+- Nothing is written to browser storage or cookies, and nothing is loaded from any other website.
+- Server messages are shown as text only, never as HTML.
+- The page makes no decisions. It cannot be tricked into publishing something the function would refuse.
+- The only two configured values are the project address and the publishable key. Both are public by design.
+
+### Decisions to approve
+
+| # | Decision | Choice | Why |
+|---|---|---|---|
+| 1 | Where the rules live | A database function plus an audit trigger, not an Edge Function | The rules sit next to the data. The audit trigger catches every change, also one made some other way. One thing fewer to deploy. |
+| 2 | Typo guards | At most 5 % away from the closest stored week, and EUR 500 to 5,000 per 1000 L | **Chosen by me, not sourced.** They stop a slipped decimal point or the wrong unit. They do not stop a careful wrong entry or a transposed digit. To be tuned against the real bulletin history. |
+| 3 | Overrides | Replacing a stored price and accepting a big move are separate, deliberate confirmations. Both can be needed for one entry. | A correction should never happen by accident |
+| 4 | Corrections | Allowed with `p_replace`, and logged. Nobody can delete a price (a Step 2 rule). | History stays traceable |
+| 5 | The page | A local file, not a hosted page | It handles a sign-in, so it is better not to put it on the internet |
+| 6 | First platform admin | Needs a real Supabase user and one row in `platform_admins`. Not done. | Until then nobody can publish |
+| 7 | Entry method | By hand, as decided in Step 2. An automatic import from the Oil Bulletin file comes later. | |
+
+### Run the tests
+
+```
+bash supabase/tests/run-entry-local.sh                       # Step 2 tests again (124), Step 4 tests (82), maths cross-check (10,500 price pairs)
+node --test supabase/tests/entry-api.e2e.mjs                 # 14 tests over real HTTP
+node --test supabase/tests/admin-page.e2e.mjs                # 18 tests in a real browser
+```
+
+The first needs the Postgres server programs and Node.js. The other two also need PostgREST (`POSTGREST_BIN`), `PGBIN`, and for the page test Playwright with Chromium (`PLAYWRIGHT_MODULE`). They only ever touch a throwaway local copy, never Supabase. Run the end-to-end tests one at a time: they use fixed ports.
+
+### What is verified, and what is not
+
+Verified (on my workspace, Postgres 16, PostgREST 12.2.3, Chromium via Playwright 1.56):
+- 124 of 124 Step 2 database checks still pass with the Step 4 migration applied.
+- 82 of 82 Step 4 database checks pass: access (admin, non-admin, signed-in without admin rights, signed out), every refusal and its code, the whole life of a price list, the exact 5 % boundaries (1,470.00 passes and 1,470.01 is refused when the neighbour is 1,400.00; 1,330.00 passes and 1,329.99 is refused), choice of the closest week, the audit trail, privileges, a simulated race between two admins, and the Brussels date.
+- 10,500 random price pairs (6,000 random, 3,000 on the 5 % line, 1,500 exact rounding ties) gave 0 differences between the database and an independent calculation of the percentage, the 5 % rule and the exact refusal sentence.
+- 14 of 14 HTTP tests on real PostgREST: 200 for success, 409 and 422 for refusals, 403 for a non-admin, 401 when signed out, 405 for a GET, 404 for a mistyped parameter name. A price with floating-point noise is refused, not rounded.
+- 18 of 18 page tests in a real Chromium, including a wrong password, mistyped prices, the comma price, Cancel, both confirmations, a non-admin, a token that runs out while reviewing, and checks that nothing is stored in the browser and that every request carries the project key. The page tests passed 11 runs in a row on the final files.
+- 42 deliberately broken copies of the migration (admin check skipped, Monday check removed, 5 % turned into 10 %, replace ignored, wrong rounding, function run as its owner, signed-out users allowed, audit trail missing a delete, and others) were all caught.
+- 30 deliberately broken copies of the page (price sent as a number, flags always on, token saved in the browser, sign-out doing nothing, review skipped, wrong sign on a fall, and others) were all caught. The first round found 5 gaps in the page tests. They were closed and the round was repeated.
+
+Not verified:
+- Nothing has run on the real Supabase. The migration is not applied there.
+- The 5 % limit and the EUR 500 to 5,000 range are my choice. I could not open the real Oil Bulletin history (the download tool was blocked), so I could not check how often a real week moves more than 5 %.
+- The guards catch gross typos. A careful wrong entry, or two digits swapped inside the range, passes.
+- The sign-in is a stand-in locally, so the page has not signed in against real Supabase Auth. It uses the standard password sign-in address.
+- The local PostgREST accepts a token for 30 seconds after it expires (measured). The version Supabase runs may differ.
+- No platform admin exists yet in the real project.
 
 ## Sources
 
