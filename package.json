@@ -1,0 +1,14 @@
+{
+  "name": "fuel-surcharge-spec",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Step 1: fuel surcharge formula, verified on paper and in tests",
+  "scripts": {
+    "test": "node --test --test-reporter=spec",
+    "crosscheck": "python3 -I crosscheck.py"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
