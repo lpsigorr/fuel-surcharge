@@ -1,8 +1,8 @@
 # fuel-surcharge
 
-Step 1 of a fuel surcharge and quoting system for Belgian road transport: the formula, written down, coded and tested before anything else is built.
+A fuel surcharge and quoting system for Belgian road transport, built in small approved steps. Step 1 is the formula, written down, coded and tested. Step 2 is the database, applied to Supabase and tested.
 
-**Status:** Step 1 approved on 2026-10-09. Nothing here is connected to a database, a website or a real customer yet.
+**Status:** Steps 1 and 2 approved on 2026-10-09. The database is applied to a Supabase project and holds no real data yet. No server code, website or real customer is connected yet.
 
 ## The rule
 
@@ -59,6 +59,8 @@ No `npm install` is needed; there are no dependencies.
 | `crosscheck.py`, `crosscheck-runner.mjs` | Independent Python recomputation of random cases against the JavaScript |
 | `try-it.mjs` | Playground that prints a readable quote |
 | `package.json` | Defines `npm test` |
+| `supabase/migrations/20261009120000_core_schema.sql` | Step 2: the database (tables, rules, access control). Applied to Supabase as `core_schema`. |
+| `supabase/tests/` | Step 2: database tests. `run-local.sh` runs everything on a throwaway local Postgres. `live_check.sql` is the safe check for the real project. |
 
 ## What is verified, and what is not
 
@@ -72,6 +74,72 @@ Not verified:
 - The tests prove the code follows the rules above. They do not prove the rules match a real carrier's contract. That is for the carrier interviews.
 - The KNV clause was seen as a search excerpt only, and the Evofenedex template mixes two index sources.
 
+## Step 2: the database
+
+Lives in `supabase/`. One shared Supabase project holds every carrier, and row level security keeps carriers apart.
+
+| Table | What it holds |
+|---|---|
+| `organizations` | A carrier |
+| `memberships` | Which user belongs to which carrier, as `owner` or `staff` |
+| `platform_admins` | People allowed to publish diesel prices. Not readable through the API. |
+| `fuel_prices` | One diesel price per Monday, the same for every carrier |
+| `surcharge_settings` | Per carrier: fuel share, lag days, threshold, credits on or off, base diesel price |
+| `zones`, `vehicle_types` | Defined by each carrier |
+| `rates` | One base rate per zone and vehicle type |
+| `quotes` | Saved quotes with every input and result frozen. Written only by server code, never editable. |
+
+| Who | Can do |
+|---|---|
+| Not signed in | Nothing |
+| Staff | Read their own carrier's data |
+| Owner | Everything staff can, plus edit rates, zones, vehicle types, settings and the carrier name |
+| Platform admin | Publish and correct diesel prices. No view into any carrier's data. |
+| Server code (secret key) | Save quotes. This key bypasses every rule, so it must never reach a browser. |
+
+### Approved decisions (2026-10-09)
+
+| # | Decision |
+|---|---|
+| 1 | One shared Supabase project for all carriers. Supabase's pricing page lists Free as 2 active projects and Pro from $25/month with extra projects from $10/mo. The risk is a mistake in the rules leaking data between carriers, so most tests target exactly that. |
+| 2 | Two carrier roles, owner and staff. The platform admin sits outside them. |
+| 3 | Quotes are saved only by server code, never directly from the browser. A saved quote cannot be changed. A correction is a new quote. |
+| 4 | Each quote freezes all its inputs and results. |
+| 5 | The database re-checks the maths on every quote and refuses anything that does not follow the formula. The rule now exists in two places, and the cross-check detects drift between them. |
+| 6 | Rate card v1 is one flat price per zone and vehicle type. No rate-card history yet. |
+| 7 | The base diesel price is a number each carrier enters in their settings. Weekly diesel prices are entered by hand for now. |
+
+### Run the tests
+
+```
+bash supabase/tests/run-local.sh     # throwaway local Postgres: 124 checks plus the maths cross-check
+```
+
+Needs the Postgres server programs (`initdb`, `pg_ctl`, `psql`, version 15 or newer) and Node.js. It never touches Supabase.
+
+`supabase/tests/live_check.sql` is for the real project. Run it as the `postgres` role in the Supabase SQL editor. It runs 30 checks and ends with an intentional error called `LIVE_CHECK_RESULTS` that lists every PASS or FAIL, so all its test data is rolled back. Run it only on an empty project (the comment at the top of the file explains why).
+
+### What is verified, and what is not
+
+Verified:
+- 124 of 124 database checks pass on Postgres 16 with a stand-in for Supabase's login system.
+- 23,000 quotes computed by the Step 1 engine were all accepted by the database. The same 23,000, each altered in one of six ways (one cent off, one wrong percentage digit, and so on), were all refused. 6,000 reference Mondays matched.
+- 12 deliberately broken copies of the migration (one carrier reading all carriers, staff editing settings, the browser writing quotes, quotes being editable, rounding changed, a threshold off by one, and others) were all caught.
+- On the real Supabase project (applied 2026-10-09 as migration `core_schema`, region eu-west-1): a fingerprint of the live structure (columns, constraints, indexes, triggers, policies, privileges, comments) is identical to the tested local one, and 30 of 30 live checks pass. The project was empty again afterwards.
+
+Not verified:
+- No real Supabase sign-in was used. The tests simulate signed-in users inside the database (role and user id). Real logins come with the login screens.
+- The design is not tested with real carriers. That is for the carrier interviews.
+- Not built yet: the server code that saves quotes, login screens, the embeddable widget, and the screen for entering diesel prices.
+- Supabase recorded the migration as version `20261009124941`. The file here is named `20261009120000`. The SQL is the same, only the timestamp differs. Keep this in mind before syncing with the Supabase command line tool.
+
+Notes from Supabase's own checkers (2026-10-09):
+- Security, info: `platform_admins` has row level security and no policy. That is intended, nobody can read it through the API.
+- Security, 2 warnings: Supabase's own helper `public.rls_auto_enable()` can be called by signed-in and signed-out users. It is not part of this migration. It exists to switch on row level security for new tables.
+- Performance, info: 4 foreign keys without an index (`rates` x2, `quotes.created_by`, `fuel_prices.entered_by`) and 2 indexes never used yet. Neither matters at this size. Indexes can be added later as a new migration.
+
+The connection between Claude and Supabase currently reaches the whole Supabase account. Supabase's [MCP docs](https://supabase.com/docs/guides/getting-started/mcp) recommend limiting it to one project, and to read-only, once real customer data exists.
+
 ## Sources
 
 - [VRT NWS / Febetra, 8 Mar 2022](https://www.vrt.be/vrtnws/nl/2022/03/08/van-1300-naar-2000-euro-voor-een-volle-dieseltank-in-een-vrachtw/)
@@ -80,3 +148,5 @@ Not verified:
 - [trans.info, Jan 2026](https://trans.info/en/belgium-hauliersbankrupt-448556) (the TLV 20 to 25 % figure)
 - [Cargoson Belgium fuel surcharge page](https://www.cargoson.com/fr/tools/fuel-surcharges/belgium)
 - [KNV fuel clause (docx, excerpt only)](https://www.knv.nl/wp-content/uploads/2022/06/Brandstofclausule-290622.docx)
+- [Supabase pricing](https://supabase.com/pricing)
+- [Supabase MCP guide](https://supabase.com/docs/guides/getting-started/mcp)
