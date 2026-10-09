@@ -1,8 +1,8 @@
 # fuel-surcharge
 
-A fuel surcharge and quoting system for Belgian road transport, built in small approved steps. Step 1 is the formula, written down, coded and tested. Step 2 is the database, applied to Supabase and tested.
+A fuel surcharge and quoting system for Belgian road transport, built in small approved steps. Step 1 is the formula, written down, coded and tested. Step 2 is the database, applied to Supabase and tested. Step 3 is the function that makes and saves a quote.
 
-**Status:** Steps 1 and 2 approved on 2026-10-09. The database is applied to a Supabase project and holds no real data yet. No server code, website or real customer is connected yet.
+**Status:** Steps 1 and 2 approved on 2026-10-09. The database is applied to a Supabase project and holds no real data yet. Step 3 (the create-quote function) is built and tested on a local copy of Supabase, but it is not approved or deployed yet. No website or real customer is connected.
 
 ## The rule
 
@@ -43,7 +43,7 @@ total     = rate x (1 + surcharge)
 Needs Node.js 20 or higher. The cross-check also needs Python 3.
 
 ```
-npm test                          # 119 unit tests
+npm test                          # 178 tests: 119 for the formula (Step 1) and 59 for the Step 3 function logic
 python3 -I crosscheck.py          # independent recomputation (on Windows: python or py)
 node try-it.mjs                   # playground: edit the numbers at the top of the file
 ```
@@ -61,6 +61,9 @@ No `npm install` is needed; there are no dependencies.
 | `package.json` | Defines `npm test` |
 | `supabase/migrations/20261009120000_core_schema.sql` | Step 2: the database (tables, rules, access control). Applied to Supabase as `core_schema`. |
 | `supabase/tests/` | Step 2: database tests. `run-local.sh` runs everything on a throwaway local Postgres. `live_check.sql` is the safe check for the real project. |
+| `supabase/functions/create-quote/index.ts` | Step 3: the web endpoint (runs on Deno). Plumbing only. |
+| `supabase/functions/_shared/` | Step 3: `create-quote.mjs` (the rules), `supabase-deps.mjs` (the database calls), `surcharge.mjs` (a copy of the Step 1 formula) |
+| `supabase/tests/functions/`, `supabase/tests/run-function-tests.sh` | Step 3: tests for the function, including a local copy of Supabase to run it against |
 
 ## What is verified, and what is not
 
@@ -140,6 +143,61 @@ Notes from Supabase's own checkers (2026-10-09):
 
 The connection between Claude and Supabase currently reaches the whole Supabase account. Supabase's [MCP docs](https://supabase.com/docs/guides/getting-started/mcp) recommend limiting it to one project, and to read-only, once real customer data exists.
 
+## Step 3: the create-quote function
+
+**Status:** built and tested on a local copy of Supabase. Not approved or deployed yet.
+
+A signed-in member of a carrier sends a zone, a vehicle type and a service date. The function looks up the carrier's settings and rate, finds the diesel price for the reference Monday, runs the Step 1 formula and saves the frozen quote. The database then re-checks the maths before accepting it. This version is for staff quotes only. The website widget comes later.
+
+Request: `POST` with the header `Authorization: Bearer <user token>` and this JSON body.
+
+```
+{ "organizationId": "<uuid>", "zoneId": "<uuid>", "vehicleTypeId": "<uuid>", "serviceDate": "2026-10-09", "customerReference": "PO-1234" }
+```
+
+`customerReference` is optional (up to 200 characters). Any other field is refused. On success the answer is `201` with the saved quote (every number frozen, in integer cents and basis points) and the same amounts written the Belgian way.
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `INVALID_JSON`, `INVALID_REQUEST` | The body is not valid. The answer names the field. |
+| 401 | `UNAUTHENTICATED` | No token, or Supabase Auth does not accept it |
+| 403 | `NOT_A_MEMBER` | The caller does not belong to that carrier, or it does not exist |
+| 404 | `ZONE_NOT_FOUND`, `VEHICLE_TYPE_NOT_FOUND`, `RATE_NOT_FOUND` | Not found for that carrier |
+| 405 | `METHOD_NOT_ALLOWED` | Anything but `POST` |
+| 409 | `SETTINGS_MISSING` | The carrier has no fuel surcharge settings yet |
+| 409 | `DIESEL_PRICE_MISSING` | No published price for the reference Monday. The function never guesses. |
+| 413 | `PAYLOAD_TOO_LARGE` | The body is over 2048 bytes |
+| 500 | `INTERNAL_ERROR` | Something broke. The message says whether the quote may have been saved. |
+
+How it is built:
+- Every read (membership, settings, zone, vehicle type, rate, diesel price) is made with the caller's own token, so the database's row level security applies to each one. The secret server key is used for one thing only: inserting the quote.
+- Each saved quote carries `engine_version`, which is `surcharge.mjs sha256:` plus the first 12 digits of the formula file's fingerprint. If the formula file changes, a test fails until the version is updated on purpose.
+- The function uses its own copy of the formula at `supabase/functions/_shared/surcharge.mjs`. A test fails if it differs from the Step 1 `surcharge.mjs` by even one byte.
+
+### Run the tests
+
+```
+npm test                                      # includes the 59 function logic tests (fake database, Node only)
+bash supabase/tests/run-function-tests.sh     # those 59, plus 30 end-to-end tests
+```
+
+The end-to-end tests build a small copy of Supabase on your computer: the real function code running on Deno with the real supabase-js, the PostgREST program that Supabase uses to serve tables, and Postgres with our migration. They need the Postgres server programs, the PostgREST program (`POSTGREST_BIN=/path/to/postgrest`) and Deno (`DENO_BIN`). They have only been run in my workspace, not on your Mac.
+
+### What is verified, and what is not
+
+Verified:
+- 59 of 59 logic tests pass, on my workspace (Node 22.22.0) and in your folder (Node 22.23.2). 178 of 178 pass for the whole `npm test`.
+- 30 of 30 end-to-end tests pass. They include: members of two carriers cannot quote for each other; forged, expired and empty tokens are refused; the server key used as a user token is refused; a removed member is refused on the next call; the browser cannot write quotes directly; a missing diesel price refuses the quote; CORS works; the server key never appears in a response or the log.
+- 250 random carriers (random settings, rates, dates) were quoted through the whole chain. The 235 quotes with a price matched an independent calculation to the cent, and the 15 without a price were refused.
+- 24 deliberately broken copies of the code (skipped membership check, guessed price, wrong rounding, server key used for reads, keys swapped, and others) were all caught.
+- `deno check` accepts `index.ts`.
+
+Not verified:
+- It has never run on the real Supabase. In the local copy the gateway and Supabase Auth are stand-ins and the API keys are plain tokens, not the real `sb_publishable_` and `sb_secret_` keys. How the function reads those keys in production is unverified until a live test.
+- Local PostgREST is version 12.2.3. The version Supabase runs may differ.
+- Sending the same request twice saves two quotes. There is no duplicate protection yet.
+- No rate limiting, and no website widget mode.
+
 ## Sources
 
 - [VRT NWS / Febetra, 8 Mar 2022](https://www.vrt.be/vrtnws/nl/2022/03/08/van-1300-naar-2000-euro-voor-een-volle-dieseltank-in-een-vrachtw/)
@@ -150,3 +208,7 @@ The connection between Claude and Supabase currently reaches the whole Supabase 
 - [KNV fuel clause (docx, excerpt only)](https://www.knv.nl/wp-content/uploads/2022/06/Brandstofclausule-290622.docx)
 - [Supabase pricing](https://supabase.com/pricing)
 - [Supabase MCP guide](https://supabase.com/docs/guides/getting-started/mcp)
+- [Supabase Edge Functions](https://supabase.com/docs/guides/functions)
+- [Edge Functions: authorization headers](https://supabase.com/docs/guides/functions/auth-headers)
+- [Edge Functions: environment variables](https://supabase.com/docs/guides/functions/secrets)
+- [Edge Functions: limits](https://supabase.com/docs/guides/functions/limits)
