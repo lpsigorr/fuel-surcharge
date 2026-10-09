@@ -2,7 +2,7 @@
 
 A fuel surcharge and quoting system for Belgian road transport, built in small approved steps. Step 1 is the formula, written down, coded and tested. Step 2 is the database, applied to Supabase and tested. Step 3 is the function that makes and saves a quote. Step 4 is entering the weekly diesel price.
 
-**Status:** Steps 1, 2 and 3 approved on 2026-10-09. The database and the create-quote function are deployed to a Supabase project, which holds no real data. Step 4 (entering the weekly diesel price) is built and tested on a local copy of Supabase, but it is not approved or deployed yet. No website or real customer is connected.
+**Status:** Steps 1 to 4 approved on 2026-10-09. The database, the create-quote function and the diesel price function are deployed to a Supabase project, which holds the full diesel price history (1,086 weekly prices from 2005-01-03 to 2026-10-05) and one platform admin, and no quote, carrier or customer data. The admin page is in use on the owner's computer: the price for Monday 2026-10-05 was published through it. No website or real customer is connected.
 
 ## The rule
 
@@ -64,9 +64,10 @@ No `npm install` is needed; there are no dependencies.
 | `supabase/functions/create-quote/index.ts` | Step 3: the web endpoint (runs on Deno). Plumbing only. |
 | `supabase/functions/_shared/` | Step 3: `create-quote.mjs` (the rules), `supabase-deps.mjs` (the database calls), `surcharge.mjs` (a copy of the Step 1 formula) |
 | `supabase/tests/functions/`, `supabase/tests/run-function-tests.sh` | Step 3: tests for the function, including a local copy of Supabase to run it against |
-| `supabase/migrations/20261009150000_diesel_price_entry.sql` | Step 4: the diesel price function and its audit trail. NOT applied to Supabase yet. |
+| `supabase/migrations/20261009150000_diesel_price_entry.sql` | Step 4: the diesel price function and its audit trail. Applied to Supabase as `diesel_price_entry`. |
 | `admin/diesel-prices.html` | Step 4: the admin page for entering the weekly price. One file, double-click to use. |
 | `supabase/tests/run-entry-local.sh`, `diesel_price_entry.test.sql`, `entry_crosscheck.mjs`, `entry-api.e2e.mjs`, `admin-page.e2e.mjs` | Step 4: tests (see the Step 4 section) |
+| `supabase/tests/live_check_step4.sql` | Step 4: the safe check for the real project (24 checks, everything rolled back) |
 
 ## What is verified, and what is not
 
@@ -136,7 +137,7 @@ Verified:
 Not verified:
 - No real Supabase sign-in was used. The tests simulate signed-in users inside the database (role and user id). Real logins come with the login screens.
 - The design is not tested with real carriers. That is for the carrier interviews.
-- Not built yet: the server code that saves quotes, login screens, the embeddable widget, and the screen for entering diesel prices.
+- Not built when Step 2 was approved: the server code that saves quotes (now Step 3), the screen for entering diesel prices (now Step 4), login screens and the embeddable widget (still open).
 - Supabase recorded the migration as version `20261009124941`. The file here is named `20261009120000`. The SQL is the same, only the timestamp differs. Keep this in mind before syncing with the Supabase command line tool.
 
 Notes from Supabase's own checkers (2026-10-09):
@@ -209,7 +210,7 @@ Not verified:
 
 ## Step 4: entering the weekly diesel price
 
-**Status:** built and tested on a local copy of Supabase. Not approved. Nothing is deployed: the migration is not applied to the real project and the page is not in use.
+**Status:** approved on 2026-10-09. The migration is deployed to the real project (Supabase recorded it as version `20261009143834`, the file here is named `20261009150000`, the SQL is the same). One platform admin exists (created in the Supabase dashboard, then one row in `platform_admins`). The Oil Bulletin history is imported (see "The history import" below) and the owner has published the price for Monday 2026-10-05 through the admin page, which was stored as `created`.
 
 A platform admin publishes one price per Monday: the EU Weekly Oil Bulletin figure for Belgium, diesel, with taxes, in EUR per 1000 litres. Every carrier's quotes read it. There are two pieces. A database function makes every decision. A one-file admin page only sends the numbers and shows the answer.
 
@@ -233,54 +234,107 @@ Every refusal carries a code, a plain sentence and a next step. On success the a
 
 ### The admin page
 
-`admin/diesel-prices.html`. Save the file on your computer and double-click it. Sign in with a platform admin account. It shows the latest 10 prices with the change from the week before, and has a form: Monday, price, Review, Publish. The price may be typed `1534.70`, `1534,70` or `1 534,70`. The Review step repeats the number back in words before anything is sent.
+`admin/diesel-prices.html`. Save the file on your computer and double-click it. Sign in with a platform admin account. It shows the latest 10 prices with the change from the week before, and has a form: Monday, price, the price again, Review, Publish. The price may be typed `1534.70`, `1534,70` or `1 534,70`. The Review step repeats the number back in words before anything is sent.
+
+**Double entry.** The price has to be typed twice. If the second box is empty, or holds a different amount, the page stops with a plain sentence and sends nothing; the Review step does not even open. The two boxes are compared as amounts, not as text, so `1431.5` and `1 431,50` count as the same. This catches a typing slip. It does not catch a wrong number that was copied twice, so the number still has to be read from the bulletin. When Review is pressed, any older review is closed first, so an old review can never stay open next to a newer message.
 
 - No password is stored. The sign-in token lives in the page's memory and disappears when the page is closed.
 - Nothing is written to browser storage or cookies, and nothing is loaded from any other website.
 - Server messages are shown as text only, never as HTML.
-- The page makes no decisions. It cannot be tricked into publishing something the function would refuse.
+- The page makes no decisions about the price. It cannot be tricked into publishing something the function would refuse. The only check it makes itself is that the two typed boxes match.
 - The only two configured values are the project address and the publishable key. Both are public by design.
+
+### The guards, tested on the real history
+
+Source: the file `Weekly_Oil_Bulletin_Prices_History_maticni_4web.xlsx` downloaded from the EU Weekly Oil Bulletin page (sha256 `2097fa594c98a4734146b7a70e5589ff71293c5d0dfb160ea48694266959dcb3`, kept in the `data` folder, which is not in git). Sheet "Prices with taxes", column `BE_price_with_tax_diesel`, unit 1000 l. That is the same figure the admin page asks for.
+
+What the file holds:
+- 1,086 usable weekly prices, every one on a Monday, from 2005-01-03 to 2026-10-05. The cell for 2013-04-01 is empty.
+- 50 Mondays are missing (the weeks around Christmas, New Year and Easter). The last missing one is 2022-04-18.
+- Lowest 853.00 (2005-01-10), highest 2,430.46 (2026-09-28). Every value has at most 2 decimals.
+- One cross-check against another source: the same file's "without taxes" value for 2019-07-29 is 595.79, which matches the EU's PDF for that week. The with-taxes column itself was not compared with the PDFs, only read from the file.
+
+Two questions were tested on the 1,085 steps from one published week to the next.
+
+1. How often is a correct price flagged, so that an extra confirmation is needed? With a 5 % limit: 46 of 1,085 weeks (4.2 %), about 2 per year. A 3 % limit would flag about 10 per year, a 7 % limit about 0.7 per year. 44 of the 1,085 weeks have exactly the same price as the week before, so a "same as last week" check would be useless.
+2. How many typing mistakes does it catch? Every correct price was mistyped in every way listed below, and each wrong value was checked against the range and the 5 % limit.
+
+| Mistake | Mistakes tried | Caught by range alone | Caught by range or the 5 % limit |
+|---|---|---|---|
+| Decimal point slipped (x10 or /10) | 2,170 | 100 % | 100 % |
+| Two neighbouring digits swapped | 3,578 | 7.9 % | 53.1 % |
+| One digit one too high or too low | 10,137 | 0.0 % | 28.7 % |
+| One digit replaced by any other | 56,452 | 9.4 % | 36.6 % |
+
+Result, agreed 2026-10-09: keep both guards as they are. The range is what stops a wrong unit. A tighter limit would flag correct prices too often (about every 5 weeks at 3 %) and a looser one catches fewer mistakes. At today's level a one-step slip in the hundreds digit of 2348.78 is a 4.26 % move, which a 5 % limit does not catch. So the guards stop gross errors only. The double entry and reading the number from the bulletin do the rest, and an automatic import would be the real protection.
+
+### The history import
+
+Done on the real project on 2026-10-09, once, as plain SQL run by the project owner's database role (`insert into public.fuel_prices (monday, price_cents) values ... on conflict (monday) do nothing`, 1,085 rows). The 2026-10-05 price was left alone because it had already been published through the admin page.
+- The source label is the default (`eu_weekly_oil_bulletin_be_diesel_with_taxes`). `entered_by` is empty for these rows (no signed-in user did it) and the audit trail shows them as inserts with no author.
+- Before the live import, all 1,086 prices were replayed in date order through the real `publish_diesel_price` function on a throwaway local copy: 1,040 went in without any confirmation, 46 needed the big-move confirmation (the same 46 as in the study above) and all were created after it, and none was refused for any other reason (so every value passed the Monday, decimals and EUR 500 to 5,000 checks). The stored table was identical to the file, with 1,086 audit lines.
+- After it, on the live project: 1,086 rows in `fuel_prices`, none on a day other than Monday, lowest 2005-01-03, latest 2026-10-05 still 234878 cents by the owner's user, 1,086 audit lines (1,085 inserts with no author plus the owner's own), and the security checker unchanged.
+- To check the content yourself: run this in the SQL editor. The answer must be `64b992fc847a9a1f0fdd62ae3e33914a`.
+
+```sql
+select md5(string_agg(monday::text || ':' || price_cents::text, E'\n' order by monday)) from public.fuel_prices;
+```
+
+I computed that checksum on the local copy built from the file before the import. The live table gave the same value afterwards.
 
 ### Decisions to approve
 
 | # | Decision | Choice | Why |
 |---|---|---|---|
 | 1 | Where the rules live | A database function plus an audit trigger, not an Edge Function | The rules sit next to the data. The audit trigger catches every change, also one made some other way. One thing fewer to deploy. |
-| 2 | Typo guards | At most 5 % away from the closest stored week, and EUR 500 to 5,000 per 1000 L | **Chosen by me, not sourced.** They stop a slipped decimal point or the wrong unit. They do not stop a careful wrong entry or a transposed digit. To be tuned against the real bulletin history. |
+| 2 | Typo guards | At most 5 % away from the closest stored week, and EUR 500 to 5,000 per 1000 L. **Kept after testing them on the real history (2026-10-09).** | They were my choice, not sourced. Tested on 1,085 real weekly steps (see "The guards, tested on the real history"): they catch every slipped decimal point or wrong unit, about half of swapped digits and about a third of single wrong digits. They do not stop a careful wrong entry. |
 | 3 | Overrides | Replacing a stored price and accepting a big move are separate, deliberate confirmations. Both can be needed for one entry. | A correction should never happen by accident |
 | 4 | Corrections | Allowed with `p_replace`, and logged. Nobody can delete a price (a Step 2 rule). | History stays traceable |
 | 5 | The page | A local file, not a hosted page | It handles a sign-in, so it is better not to put it on the internet |
-| 6 | First platform admin | Needs a real Supabase user and one row in `platform_admins`. Not done. | Until then nobody can publish |
-| 7 | Entry method | By hand, as decided in Step 2. An automatic import from the Oil Bulletin file comes later. | |
+| 6 | First platform admin | Done 2026-10-09: a real Supabase user created in the dashboard, plus one row in `platform_admins`. | Until then nobody could publish |
+| 7 | Entry method | By hand, as decided in Step 2. An automatic import from the Oil Bulletin file comes later. | The guards only catch gross typos, so an automatic import would be the real protection against a wrong number. Not built, not approved. |
+| 8 | Double entry | The admin page asks for the price twice and refuses a mismatch. Approved 2026-10-09. | A mistyped digit is the likeliest error, and the guards miss about half of them |
+| 9 | History | The whole Oil Bulletin history (1,086 weeks) is stored, imported once with SQL. Approved 2026-10-09. | The 5 % guard needs a neighbouring week, and a quote for an older service date needs the price of its week |
 
 ### Run the tests
 
 ```
 bash supabase/tests/run-entry-local.sh                       # Step 2 tests again (124), Step 4 tests (82), maths cross-check (10,500 price pairs)
 node --test supabase/tests/entry-api.e2e.mjs                 # 14 tests over real HTTP
-node --test supabase/tests/admin-page.e2e.mjs                # 18 tests in a real browser
+node --test supabase/tests/admin-page.e2e.mjs                # 21 tests in a real browser
 ```
 
 The first needs the Postgres server programs and Node.js. The other two also need PostgREST (`POSTGREST_BIN`), `PGBIN`, and for the page test Playwright with Chromium (`PLAYWRIGHT_MODULE`). They only ever touch a throwaway local copy, never Supabase. Run the end-to-end tests one at a time: they use fixed ports.
 
+`supabase/tests/live_check_step4.sql` is the check for the real project. Run it as the `postgres` role in the Supabase SQL editor. It runs 24 checks and ends with an intentional error called `LIVE_CHECK_STEP4_RESULTS` that lists every PASS or FAIL, so all its test data is rolled back. Run it only while `fuel_prices` has no rows for 2026-09-21 and 2026-09-28.
+
 ### What is verified, and what is not
 
-Verified (on my workspace, Postgres 16, PostgREST 12.2.3, Chromium via Playwright 1.56):
+Verified on the real project (2026-10-09):
+- The migration was applied as `diesel_price_entry`. A fingerprint of the live structure matches the tested local copy: 189 of 189 lines for everything in the public schema plus the private helpers (md5 `5099c830...`), and 14 of 14 lines for the Step 4 additions (the audit table, its rights, the function and its rights). One cosmetic difference: the live Postgres writes an extra letter `m` (the MAINTAIN right, added in Postgres 17) in the audit table's owner rights, which local Postgres 16 cannot show. It was ignored in the comparison, as in Step 2.
+- 24 of 24 live checks pass (signed-out visitor refused, non-admin refused, every refusal code, the +7.21 % sentence, replace, unchanged, the audit trail with the author, function and audit table rights). The project was empty again afterwards.
+- The owner opened the admin page, signed in with the real admin account and published Monday 2026-10-05 = 2,348.78. The database shows that row (234878 cents, entered by the owner's user) and its audit line with the same author. That is the first time the page and the function ran against real Supabase Auth.
+- The history import (see above): 1,086 rows, checksum equal to the file's.
+- Supabase's security checker shows one new info note (the audit table has row level security and no policy, which is intended). The two earlier warnings about `rls_auto_enable()` are unchanged and not part of this project's code.
+
+Verified on my workspace (Postgres 16, PostgREST 12.2.3, Chromium via Playwright 1.56):
 - 124 of 124 Step 2 database checks still pass with the Step 4 migration applied.
 - 82 of 82 Step 4 database checks pass: access (admin, non-admin, signed-in without admin rights, signed out), every refusal and its code, the whole life of a price list, the exact 5 % boundaries (1,470.00 passes and 1,470.01 is refused when the neighbour is 1,400.00; 1,330.00 passes and 1,329.99 is refused), choice of the closest week, the audit trail, privileges, a simulated race between two admins, and the Brussels date.
 - 10,500 random price pairs (6,000 random, 3,000 on the 5 % line, 1,500 exact rounding ties) gave 0 differences between the database and an independent calculation of the percentage, the 5 % rule and the exact refusal sentence.
 - 14 of 14 HTTP tests on real PostgREST: 200 for success, 409 and 422 for refusals, 403 for a non-admin, 401 when signed out, 405 for a GET, 404 for a mistyped parameter name. A price with floating-point noise is refused, not rounded.
-- 18 of 18 page tests in a real Chromium, including a wrong password, mistyped prices, the comma price, Cancel, both confirmations, a non-admin, a token that runs out while reviewing, and checks that nothing is stored in the browser and that every request carries the project key. The page tests passed 11 runs in a row on the final files.
+- 21 of 21 page tests in a real Chromium, including a wrong password, mistyped prices, the comma price, the double entry (second box empty, eight different mismatches, equal amounts written differently, an open review closed by a newer answer), Cancel, both confirmations, a non-admin, a token that runs out while reviewing, and checks that nothing is stored in the browser and that every request carries the project key. The page tests passed 5 runs in a row on the final files.
 - 42 deliberately broken copies of the migration (admin check skipped, Monday check removed, 5 % turned into 10 %, replace ignored, wrong rounding, function run as its owner, signed-out users allowed, audit trail missing a delete, and others) were all caught.
-- 30 deliberately broken copies of the page (price sent as a number, flags always on, token saved in the browser, sign-out doing nothing, review skipped, wrong sign on a fall, and others) were all caught. The first round found 5 gaps in the page tests. They were closed and the round was repeated.
+- 42 deliberately broken copies of the page (price sent as a number, flags always on, token saved in the browser, sign-out doing nothing, review skipped, wrong sign on a fall, the two price boxes not compared, compared as text, compared on whole euros only, the old review left open, and others) were all caught. The first round on the first version found 5 gaps in the page tests. They were closed and the round was repeated. The 12 broken copies for the double entry were run on the new page.
 
 Not verified:
-- Nothing has run on the real Supabase. The migration is not applied there.
-- The 5 % limit and the EUR 500 to 5,000 range are my choice. I could not open the real Oil Bulletin history (the download tool was blocked), so I could not check how often a real week moves more than 5 %.
+- The 5 % limit and the EUR 500 to 5,000 range were my choice. They are now tested on the real history (above) but are still not a sourced rule.
+- The terms of reuse of the Oil Bulletin data are not checked. Check them before showing these prices to customers.
+- When the bulletin publishes the price of a new Monday (which weekday it appears) is not established. The 7-day default lag in the quote formula was chosen without it.
+- The history is a one-off import. Nothing updates it automatically: each week's price has to be entered through the admin page.
 - The guards catch gross typos. A careful wrong entry, or two digits swapped inside the range, passes.
-- The sign-in is a stand-in locally, so the page has not signed in against real Supabase Auth. It uses the standard password sign-in address.
+- My automated page tests use a stand-in for the sign-in service. Real Supabase Auth was exercised only by the owner's own use of the page (above), which is not repeatable by a test.
 - The local PostgREST accepts a token for 30 seconds after it expires (measured). The version Supabase runs may differ.
-- No platform admin exists yet in the real project.
+- Only one platform admin exists, and the page has only been used from one computer.
 
 ## Sources
 

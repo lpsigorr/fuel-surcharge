@@ -38,9 +38,11 @@ async function signIn(email, password) {
   await page.fill('#password', password);
   await page.click('#signin-button');
 }
-async function enter(monday, price) {
+// The price is typed twice (double entry). By default the second box gets the same text as the first.
+async function enter(monday, price, again = price) {
   await page.fill('#monday', monday);
   await page.fill('#price', price);
+  await page.fill('#price2', again);
   await page.click('#review-button');
 }
 
@@ -96,8 +98,41 @@ describe('the admin page, in a real browser', { skip: playwright ? false : 'Play
     assert.equal(rpcCalls.length, 0);
   });
 
+  test('4b. double entry: the second box left empty is stopped with its own sentence; nothing is sent', async () => {
+    for (const blank of ['', '   ']) {
+      await enter('2026-09-21', '1431.50', blank);
+      assert.equal(await text('#result'), 'Type the price a second time in the last box, to confirm it.', `for "${blank}"`);
+      assert.equal(await page.locator('#review').isVisible(), false, 'no review is offered');
+      assert.equal(await page.evaluate(() => pending), null);
+    }
+    assert.equal(rpcCalls.length, 0);
+  });
+
+  test('4c. double entry: two different amounts are stopped, however small the difference; nothing is sent', async () => {
+    const sentence = 'The two prices are not the same. Check the number in the bulletin and type it again in both boxes. Nothing was sent.';
+    const pairs = [
+      ['1431.50', '1341.50'],   // two digits swapped in the euros
+      ['1431.50', '1431.05'],   // two digits swapped in the cents
+      ['1431.50', '1431.51'],   // one cent apart
+      ['1431.50', '1431.5.'],   // second box is not a price
+      ['1431.50', 'abc'],
+      ['1431.50', '14315'],     // a decimal point forgotten in the second box
+      ['1431.50', '1432'],      // a whole euro apart
+      ['99999', '9999'],        // a digit missing in the second box
+    ];
+    for (const [first, second] of pairs) {
+      await enter('2026-09-21', first, second);
+      assert.equal(await text('#result'), sentence, `${first} against ${second}`);
+      assert.equal(await page.locator('#review').isVisible(), false, `no review for ${first} against ${second}`);
+      assert.equal(await page.evaluate(() => pending), null);
+    }
+    assert.equal(rpcCalls.length, 0);
+    await shot('4c-mismatch');
+  });
+
   test('5. a comma price is understood; review shows the exact sentence; publishing creates the first price', async () => {
-    await enter('2026-09-21', '1 431,50');
+    // the second box holds the same amount written another way: "1 431,50" and "1431.5" are both EUR 1,431.50
+    await enter('2026-09-21', '1 431,50', '1431.5');
     await page.waitForSelector('#review', { state: 'visible' });
     assert.equal(await text('#review-text'), 'Publish EUR 1,431.50 per 1000 L (EUR 1.4315 per litre) as the price in force on Monday 21 September 2026?');
     await shot('5-review');
@@ -107,6 +142,8 @@ describe('the admin page, in a real browser', { skip: playwright ? false : 'Play
     assert.deepEqual(rpcCalls.at(-1), { p_monday: '2026-09-21', p_eur_per_1000l: '1431.50', p_replace: false, p_accept_big_move: false }, 'the price travels as text');
     assert.deepEqual(stored(), ['2026-09-21:143150']);
     await waitText('#prices', /21 September 2026\s+1,431\.50\s+1\.4315/);   // the list refreshes a moment after the result box
+    assert.equal(await page.inputValue('#price'), '', 'the first price box is emptied after publishing');
+    assert.equal(await page.inputValue('#price2'), '', 'the second price box is emptied after publishing');
   });
 
   test('6. Cancel in the review sends nothing', async () => {
@@ -114,6 +151,27 @@ describe('the admin page, in a real browser', { skip: playwright ? false : 'Play
     await enter('2026-09-28', '1500');
     await page.click('#cancel');
     assert.equal(await page.locator('#review').isVisible(), false);
+    assert.equal(rpcCalls.length, before);
+  });
+
+  test('6b. an open review never stays next to a newer answer: a mismatch or a mistyped price closes it', async () => {
+    const before = rpcCalls.length;
+    await enter('2026-09-28', '1500');
+    await page.waitForSelector('#review', { state: 'visible' });
+    // change the second box, press Review again
+    await page.fill('#price2', '1600');
+    await page.click('#review-button');
+    assert.match(await text('#result'), /The two prices are not the same/);
+    assert.equal(await page.locator('#review').isVisible(), false, 'the old review is closed');
+    assert.equal(await page.evaluate(() => pending), null, 'and nothing is waiting to be published');
+    // same with a first box that is not a price
+    await enter('2026-09-28', '1500');
+    await page.waitForSelector('#review', { state: 'visible' });
+    await page.fill('#price', 'abc');
+    await page.click('#review-button');
+    assert.match(await text('#result'), /Type the price in EUR per 1000 litres/);
+    assert.equal(await page.locator('#review').isVisible(), false);
+    assert.equal(await page.evaluate(() => pending), null);
     assert.equal(rpcCalls.length, before);
   });
 

@@ -12,6 +12,9 @@
   and no server is needed. Sign in with your platform admin account, type the Monday and the price from the
   EU Weekly Oil Bulletin (Belgium, diesel, with taxes, EUR per 1000 litres), and publish.
 
+  To catch a typing slip, the price is typed twice and the two boxes must hold the same amount before the
+  Review step opens. That is the only check this page makes itself, and it is about typing, not about the price.
+
   What it does NOT do: it makes no decisions. Every check (is it a Monday, is the number sane, is it more than 5 %
   away from the neighbouring week, does that Monday already have a price) is made by the database function
   public.publish_diesel_price. This page only sends the numbers and shows the answer.
@@ -109,6 +112,10 @@
           <div>
             <label for="price">Price, EUR per 1000 L</label>
             <input id="price" type="text" inputmode="decimal" placeholder="1534.70" required>
+          </div>
+          <div>
+            <label for="price2">Type the price again</label>
+            <input id="price2" type="text" inputmode="decimal" placeholder="type it again" autocomplete="off" required>
           </div>
         </div>
         <div class="actions"><button class="primary" type="submit" id="review-button">Review</button></div>
@@ -234,10 +241,16 @@ async function loadPrices() {
 $('entry-form').addEventListener('submit', (event) => {
   event.preventDefault();
   setMessage($('result'), 'ok', []);
+  pending = null; $('review').hidden = true;   // an older review must never stay open next to a new answer
   const monday = $('monday').value;
   const priceText = normalisePrice($('price').value);
+  const againRaw = $('price2').value;
   if (!monday) return setMessage($('result'), 'bad', ['Pick the Monday.']);
   if (!priceText) return setMessage($('result'), 'bad', ['Type the price in EUR per 1000 litres with at most 2 decimals, for example 1534.70.']);
+  // Double entry: the price must be typed twice, and both must be the same amount ("1534.7" and "1534,70" are the same).
+  if (!againRaw.trim()) return setMessage($('result'), 'bad', ['Type the price a second time in the last box, to confirm it.']);
+  const againText = normalisePrice(againRaw);
+  if (!againText || cents(againText) !== cents(priceText)) return setMessage($('result'), 'bad', ['The two prices are not the same. Check the number in the bulletin and type it again in both boxes. Nothing was sent.']);
   pending = { monday, priceText, replace: false, acceptBigMove: false };
   $('review-text').textContent = `Publish EUR ${eur(cents(priceText))} per 1000 L (EUR ${perLitre(cents(priceText))} per litre) as the price in force on Monday ${longDate(monday)}?`;
   $('review').hidden = false;
@@ -277,7 +290,7 @@ function onPublished(r) {
   if (r.big_move_accepted) lines.push('This was more than 5 % away and you confirmed it.');
   setMessage($('result'), 'ok', lines);
   pending = null;
-  $('price').value = '';
+  $('price').value = ''; $('price2').value = '';
   loadPrices();
 }
 
